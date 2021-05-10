@@ -17,6 +17,7 @@ def _parse_args():
         "--task",
         type=str,
         default="text-classification",
+        choices=dict2class.keys(),
         help="model_id from the model on https://huggingface.co/models",
     )
     parser.add_argument("--file_name", type=str, default="pt_model", help="file name of archive")
