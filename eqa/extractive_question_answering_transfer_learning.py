@@ -15,7 +15,6 @@ import transformers
 from constants import constants
 from torch.utils.data import DataLoader
 
-
 root = logging.getLogger()
 root.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)

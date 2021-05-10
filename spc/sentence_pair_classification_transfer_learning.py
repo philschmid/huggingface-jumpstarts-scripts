@@ -1,27 +1,21 @@
 import argparse
-import copy
 import json
 import logging
 import os
 import sys
 import tarfile
-import time
 
 import boto3
-import numpy as np
-import pandas as pd
-import torch
-import transformers
 from constants import constants
-from torch.utils.data import DataLoader
-
+from datasets import load_dataset
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
+                          Trainer, TrainingArguments)
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)
 root.addHandler(handler)
-
-device = torch.device(constants.CUDA_0 if torch.cuda.is_available() else constants.CPU_0)
 
 
 def download_from_s3(bucket, key, local_rel_dir, model_name):
@@ -47,152 +41,91 @@ def _parse_args():
     return parser.parse_known_args()
 
 
-class SPCDataset(torch.utils.data.Dataset):
-    def __init__(self, encodings, labels):
-        self.encodings = encodings
-        self.labels = labels
-
-    def __getitem__(self, idx):
-        item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
-        item["labels"] = torch.tensor(self.labels[idx])
-        return item
-
-    def __len__(self):
-        return len(self.labels)
-
-
-def _get_tokenizer(dir_name):
-    config = transformers.AutoConfig.from_pretrained(dir_name)
-    tokenizer = transformers.AutoTokenizer.from_pretrained(dir_name, config=config)
-    return config, tokenizer
-
-
 def _prepare_data(data_dir, tokenizer):
-    df_data = pd.read_csv(
-        os.path.join(data_dir, constants.INPUT_DATA_FILENAME),
-        header=None,
-        names=[constants.LABELS, constants.SENTENCES1, constants.SENTENCES2],
+    # load dataset from csv
+    dataset = load_dataset(
+        "csv",
+        data_files=os.path.join(data_dir, constants.INPUT_DATA_FILENAME),
+        column_names=[constants.LABELS, constants.SENTENCES1, constants.SENTENCES2],
+    )["train"]
+
+    # preprocess dataset
+    preprocessed_dataset = dataset.map(
+        lambda batch: tokenizer(
+            *(batch[constants.SENTENCES1], batch[constants.SENTENCES2]),
+            padding=True,
+            max_length=constants.MAX_SEQ_LENGTH,
+            truncation=True,
+        )
     )
-    df_data = df_data.iloc[np.random.permutation(len(df_data))]
-
-    labels = df_data.copy().pop(constants.LABELS).tolist()
-    num_labels = np.unique(np.array(labels)).shape[0]
-    assert num_labels == 2
-    sentences1 = df_data.copy().pop(constants.SENTENCES1).tolist()
-    sentences2 = df_data.copy().pop(constants.SENTENCES2).tolist()
-
-    train_data_size = int(constants.TRAIN_VAL_SPLIT * len(labels))
-    train_labels, val_labels = labels[0:train_data_size], labels[train_data_size:]
-    train_sentences1, val_sentences1 = sentences1[0:train_data_size], sentences1[train_data_size:]
-    train_sentences2, val_sentences2 = sentences2[0:train_data_size], sentences2[train_data_size:]
-
-    train_encodings = tokenizer(
-        train_sentences1, train_sentences2, max_length=constants.MAX_SEQ_LENGTH, truncation=True, padding=True
-    )
-    val_encodings = tokenizer(
-        val_sentences1, val_sentences2, max_length=constants.MAX_SEQ_LENGTH, truncation=True, padding=True
-    )
-
-    dataset_sizes = {constants.TRAIN: len(train_sentences1), constants.VAL: len(val_sentences1)}
-
-    return train_encodings, val_encodings, train_labels, val_labels, dataset_sizes
+    # train_test_split dataset
+    preprocessed_dataset = preprocessed_dataset.train_test_split(test_size=1 - constants.TRAIN_VAL_SPLIT)
+    return preprocessed_dataset["train"], preprocessed_dataset["test"]
 
 
-def train_model(dataloaders, dataset_sizes, model, optimizer, num_epochs):
-    since = time.time()
-    best_model_wts = copy.deepcopy(model.state_dict())
-    best_acc = 0.0
-    for epoch in range(num_epochs):
-        logging.info("Epoch {}/{}".format(epoch, num_epochs - 1))
-        for phase in [constants.TRAIN, constants.VAL]:
-            if phase == constants.TRAIN:
-                model.train()  # Set model to training mode
-            else:
-                model.eval()  # Set model to evaluate mode
-
-            running_loss = 0.0
-            running_corrects = 0
-            # Iterate over data.
-            for batch in dataloaders[phase]:
-                input_ids = batch[constants.INPUT_IDS].to(device)
-                attention_mask = batch[constants.ATTENTION_MASK].to(device)
-                labels = batch[constants.LABELS].to(device)
-
-                optimizer.zero_grad()
-                with torch.set_grad_enabled(phase == constants.TRAIN):
-                    if constants.TOKEN_TYPE_IDS in batch.keys():
-                        token_type_ids = batch[constants.TOKEN_TYPE_IDS].to(device)
-                        outputs = model(
-                            input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids, labels=labels
-                        )
-                    else:
-                        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-                    _, preds = torch.max(outputs[1], 1)
-                    loss = outputs[0]
-                    # backward + optimize only if in training phase
-                    if phase == constants.TRAIN:
-                        loss.backward()
-                        optimizer.step()
-                # statistics
-                running_loss += loss.item() * input_ids.size(0)
-                running_corrects += torch.sum(preds == labels.data)
-            epoch_loss = running_loss / dataset_sizes[phase]
-            epoch_acc = running_corrects.double() / dataset_sizes[phase]
-            logging.info("{} Loss: {:.4f} Acc: {:.4f}".format(phase, epoch_loss, epoch_acc))
-
-            # deep copy the model
-            if phase == constants.VAL and epoch_acc > best_acc:
-                best_acc = epoch_acc
-                best_model_wts = copy.deepcopy(model.state_dict())
-
-    time_elapsed = time.time() - since
-    logging.info("Training complete in {:.0f}m {:.0f}s".format(time_elapsed // 60, time_elapsed % 60))
-    logging.info("Best val acc: {:4f}".format(best_acc))
-
-    return best_model_wts
-
-
-def _get_model(args):
+def _get_model_and_tokenizer(args):
+    # download model from s3
     download_from_s3(
         bucket=args.model_artifact_bucket,
         key=args.model_artifact_key,
         local_rel_dir=".",
         model_name=constants.DOWNLOADED_MODEL_NAME,
     )
+    # extract model files
     tarball_extract_dir_name = constants.DOWNLOADED_MODEL_NAME.replace(constants.DOT_TAR_GZ, "")
     with tarfile.open(constants.DOWNLOADED_MODEL_NAME) as saved_model_tar:
         saved_model_tar.extractall(tarball_extract_dir_name)
-    model_file_name = args.model_artifact_key.split("/")[1].replace(constants.DOT_TAR_GZ, constants.DOT_PT)
-    model = torch.load(os.path.join(tarball_extract_dir_name, model_file_name))
-    if torch.cuda.is_available():
-        model.to(device)
-    model.eval()
-    return model, model_file_name, tarball_extract_dir_name
+    # load model and tokenizer
+    model = AutoModelForSequenceClassification.from_pretrained(tarball_extract_dir_name)
+    tokenizer = AutoTokenizer.from_pretrained(tarball_extract_dir_name)
+    return model, tokenizer
+
+
+def _compute_metrics(pred):
+    labels = pred.label_ids
+    preds = pred.predictions.argmax(-1)
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="binary")
+    acc = accuracy_score(labels, preds)
+    return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
 
 
 def run_with_args(args):
-    model, model_file_name, tarball_extract_dir_name = _get_model(args=args)
-    config, tokenizer = _get_tokenizer(tarball_extract_dir_name)
-    optimizer = transformers.AdamW(model.parameters(), lr=args.adam_learning_rate)
+    model, tokenizer = _get_model_and_tokenizer(args=args)
 
-    train_encodings, val_encodings, train_labels, val_labels, dataset_sizes = _prepare_data(args.train, tokenizer)
-    train_loader = DataLoader(
-        SPCDataset(train_encodings, train_labels), batch_size=args.batch_size, shuffle=constants.SHUFFLE_TRUE
+    train_dataset, eval_dataset = _prepare_data(args.train, tokenizer)
+
+    logging.info(f" loaded train_dataset sizes is: {len(train_dataset)}")
+    logging.info(f" loaded eval_dataset sizes is: {len(eval_dataset)}")
+
+    # define training args
+    training_args = TrainingArguments(
+        output_dir=args.model_dir,
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,  # TODO: is this a good idea?
+        evaluation_strategy="epoch",
+        logging_dir=f"{args.model_dir}/logs",
+        learning_rate=float(args.adam_learning_rate),
+        load_best_model_at_end=True,
+        metric_for_best_model="f1",
     )
-    val_loader = DataLoader(
-        SPCDataset(val_encodings, val_labels), batch_size=args.batch_size, shuffle=constants.SHUFFLE_FALSE
+
+    # create Trainer instance
+    trainer = Trainer(
+        model=model,
+        tokenizer=tokenizer,
+        args=training_args,
+        compute_metrics=_compute_metrics,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
     )
-    dataloaders = {constants.TRAIN: train_loader, constants.VAL: val_loader}
 
-    logging.info("dataset sizes: {}".format(dataset_sizes))
-    best_model_wts = train_model(dataloaders, dataset_sizes, model, optimizer, num_epochs=args.epochs)
+    # train model
+    trainer.train()
 
-    if args.current_host == args.hosts[0]:
-        org_model = torch.load(os.path.join(tarball_extract_dir_name, model_file_name))
-        org_model.load_state_dict(best_model_wts)
-        torch.save(org_model, os.path.join(args.model_dir, model_file_name))
-        tokenizer.save_pretrained(args.model_dir)
-        config.save_pretrained(args.model_dir)
+    # Saves the model to s3
+    trainer.save_model(args.model_dir)
+    tokenizer.save_pretrained(args.model_dir)
 
 
 if __name__ == "__main__":
