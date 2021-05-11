@@ -9,8 +9,7 @@ import boto3
 from constants import constants
 from datasets import load_dataset
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
-                          Trainer, TrainingArguments)
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
@@ -47,6 +46,7 @@ def _prepare_data(data_dir, tokenizer):
         "csv",
         data_files=os.path.join(data_dir, constants.INPUT_DATA_FILENAME),
         column_names=[constants.LABELS, constants.SENTENCES1, constants.SENTENCES2],
+        cache_dir="/opt/ml/input",
     )["train"]
 
     # preprocess dataset
