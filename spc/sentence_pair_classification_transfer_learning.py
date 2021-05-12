@@ -9,7 +9,8 @@ import boto3
 from constants import constants
 from datasets import load_dataset
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments
+from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
+                          Trainer, TrainingArguments)
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)

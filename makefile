@@ -5,7 +5,7 @@ check_dirs := spc eqa
 # Check that source code meets quality standards
 
 quality:
-	black --check --line-length 119 --target-version py36 $(check_dirs)
+	#black --check --line-length 119 --target-version py36 $(check_dirs)
 	# isort --check-only $(check_dirs)
 	flake8 $(check_dirs)
 

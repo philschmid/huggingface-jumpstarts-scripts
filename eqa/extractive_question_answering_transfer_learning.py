@@ -6,18 +6,9 @@ import pathlib
 import sys
 import tarfile
 
-
-from transformers import (
-    AutoTokenizer,
-    AutoModelForQuestionAnswering,
-    TrainingArguments,
-    Trainer,
-    default_data_collator,
-)
-
 from constants import constants
 from datasets import load_dataset
-import os
+from transformers import AutoModelForQuestionAnswering, AutoTokenizer, Trainer, TrainingArguments
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
