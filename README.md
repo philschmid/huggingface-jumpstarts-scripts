@@ -3,5 +3,6 @@
 
 ## Naming
 
-**eqa** -> Extractive Question Answering
-**spc** -> Sentence Pair Classification (Text-Classification)
+**eqa** -> Extractive Question Answering  
+**spc** -> Sentence Pair Classification (Text-Classification)  
+
