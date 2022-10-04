@@ -91,7 +91,7 @@ def _get_model_and_tokenizer(args):
                 if not is_within_directory(path, member_path):
                     raise Exception("Attempted Path Traversal in Tar File")
         
-            tar.extractall(path, members, numeric_owner) 
+            tar.extractall(path, members, numeric_owner=numeric_owner) 
             
         
         safe_extract(saved_model_tar, tarball_extract_dir_name)
